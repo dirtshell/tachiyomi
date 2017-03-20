@@ -9,6 +9,7 @@ import android.support.design.widget.TabLayout
 import android.support.v4.graphics.drawable.DrawableCompat
 import android.support.v4.view.ViewPager
 import android.support.v4.widget.DrawerLayout
+import android.support.v7.app.AppCompatActivity
 import android.support.v7.view.ActionMode
 import android.support.v7.widget.SearchView
 import android.view.*
@@ -25,6 +26,7 @@ import eu.kanade.tachiyomi.ui.category.CategoryActivity
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.util.inflate
 import eu.kanade.tachiyomi.util.toast
+import eu.kanade.tachiyomi.widget.DialogCheckboxView
 import kotlinx.android.synthetic.main.activity_main.*
 import kotlinx.android.synthetic.main.fragment_library.*
 import nucleus.factory.RequiresPresenter
@@ -355,7 +357,7 @@ class LibraryFragment : BaseRxFragment<LibraryPresenter>(), ActionMode.Callback 
      */
     fun createActionModeIfNeeded() {
         if (actionMode == null) {
-            actionMode = activity.startSupportActionMode(this)
+            actionMode = (activity as AppCompatActivity).startSupportActionMode(this)
         }
     }
 
@@ -480,12 +482,19 @@ class LibraryFragment : BaseRxFragment<LibraryPresenter>(), ActionMode.Callback 
     }
 
     private fun showDeleteMangaDialog() {
+        val view = DialogCheckboxView(context).apply {
+            setDescription(R.string.confirm_delete_manga)
+            setOptionDescription(R.string.also_delete_chapters)
+        }
+
         MaterialDialog.Builder(activity)
-                .content(R.string.confirm_delete_manga)
+                .title(R.string.action_remove)
+                .customView(view, true)
                 .positiveText(android.R.string.yes)
                 .negativeText(android.R.string.no)
                 .onPositive { dialog, action ->
-                    presenter.removeMangaFromLibrary()
+                    val deleteChapters = view.isChecked()
+                    presenter.removeMangaFromLibrary(deleteChapters)
                     destroyActionModeIfNeeded()
                 }
                 .show()

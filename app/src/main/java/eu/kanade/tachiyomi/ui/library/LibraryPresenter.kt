@@ -13,7 +13,9 @@ import eu.kanade.tachiyomi.data.database.models.MangaCategory
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.data.preference.getOrDefault
-import eu.kanade.tachiyomi.data.source.SourceManager
+import eu.kanade.tachiyomi.source.LocalSource
+import eu.kanade.tachiyomi.source.SourceManager
+import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.base.presenter.BasePresenter
 import eu.kanade.tachiyomi.util.combineLatest
 import eu.kanade.tachiyomi.util.isNullOrUnsubscribed
@@ -125,7 +127,7 @@ class LibraryPresenter : BasePresenter<LibraryFragment>() {
      */
     private fun applyFilters(map: Map<Int, List<Manga>>): Map<Int, List<Manga>> {
         // Cached list of downloaded manga directories given a source id.
-        val mangaDirectories = mutableMapOf<Int, Array<UniFile>>()
+        val mangaDirsForSource = mutableMapOf<Long, Map<String?, UniFile>>()
 
         // Cached list of downloaded chapter directories for a manga.
         val chapterDirectories = mutableMapOf<Long, Boolean>()
@@ -145,15 +147,17 @@ class LibraryPresenter : BasePresenter<LibraryFragment>() {
 
             // Filter when the download directory doesn't exist or is null.
             if (filterDownloaded) {
-                val mangaDirs = mangaDirectories.getOrPut(source.id) {
-                    downloadManager.findSourceDir(source)?.listFiles() ?: emptyArray()
+                // Get the directories for the source of the manga.
+                val dirsForSource = mangaDirsForSource.getOrPut(source.id) {
+                    val sourceDir = downloadManager.findSourceDir(source)
+                    sourceDir?.listFiles()?.associateBy { it.name }.orEmpty()
                 }
 
                 val mangaDirName = downloadManager.getMangaDirName(manga)
-                val mangaDir = mangaDirs.find { it.name == mangaDirName } ?: return@f false
+                val mangaDir = dirsForSource[mangaDirName] ?: return@f false
 
                 val hasDirs = chapterDirectories.getOrPut(manga.id!!) {
-                    (mangaDir.listFiles() ?: emptyArray()).isNotEmpty()
+                    mangaDir.listFiles()?.isNotEmpty() ?: false
                 }
                 if (!hasDirs) {
                     return@f false
@@ -173,12 +177,9 @@ class LibraryPresenter : BasePresenter<LibraryFragment>() {
     private fun applySort(map: Map<Int, List<Manga>>): Map<Int, List<Manga>> {
         val sortingMode = preferences.librarySortingMode().getOrDefault()
 
-        // TODO lazy initialization in kotlin 1.1
-        var lastReadManga: Map<Long, Int>? = null
-        if (sortingMode == LibrarySort.LAST_READ) {
+        val lastReadManga by lazy {
             var counter = 0
-            lastReadManga = db.getLastReadManga().executeAsBlocking()
-                    .associate { it.id!! to counter++ }
+            db.getLastReadManga().executeAsBlocking().associate { it.id!! to counter++ }
         }
 
         val sortFn: (Manga, Manga) -> Int = { manga1, manga2 ->
@@ -186,8 +187,8 @@ class LibraryPresenter : BasePresenter<LibraryFragment>() {
                 LibrarySort.ALPHA -> manga1.title.compareTo(manga2.title)
                 LibrarySort.LAST_READ -> {
                     // Get index of manga, set equal to list if size unknown.
-                    val manga1LastRead = lastReadManga!![manga1.id!!] ?: lastReadManga!!.size
-                    val manga2LastRead = lastReadManga!![manga2.id!!] ?: lastReadManga!!.size
+                    val manga1LastRead = lastReadManga[manga1.id!!] ?: lastReadManga.size
+                    val manga2LastRead = lastReadManga[manga2.id!!] ?: lastReadManga.size
                     manga1LastRead.compareTo(manga2LastRead)
                 }
                 LibrarySort.LAST_UPDATED -> manga2.last_update.compareTo(manga1.last_update)
@@ -302,19 +303,31 @@ class LibraryPresenter : BasePresenter<LibraryFragment>() {
 
     /**
      * Remove the selected manga from the library.
+     *
+     * @param deleteChapters whether to also delete downloaded chapters.
      */
-    fun removeMangaFromLibrary() {
+    fun removeMangaFromLibrary(deleteChapters: Boolean) {
         // Create a set of the list
-        val mangaToDelete = selectedMangas.toSet()
+        val mangaToDelete = selectedMangas.distinctBy { it.id }
+        mangaToDelete.forEach { it.favorite = false }
 
-        Observable.from(mangaToDelete)
+        Observable.fromCallable { db.insertMangas(mangaToDelete).executeAsBlocking() }
+                .onErrorResumeNext { Observable.empty() }
                 .subscribeOn(Schedulers.io())
-                .doOnNext {
-                    it.favorite = false
-                    coverCache.deleteFromCache(it.thumbnail_url)
+                .subscribe()
+
+        Observable.fromCallable {
+            mangaToDelete.forEach { manga ->
+                coverCache.deleteFromCache(manga.thumbnail_url)
+                if (deleteChapters) {
+                    val source = sourceManager.get(manga.source) as? HttpSource
+                    if (source != null) {
+                        downloadManager.findMangaDir(source, manga)?.delete()
+                    }
                 }
-                .toList()
-                .flatMap { db.insertMangas(it).asRxObservable() }
+            }
+        }
+                .subscribeOn(Schedulers.io())
                 .subscribe()
     }
 
@@ -345,6 +358,11 @@ class LibraryPresenter : BasePresenter<LibraryFragment>() {
      */
     @Throws(IOException::class)
     fun editCoverWithStream(inputStream: InputStream, manga: Manga): Boolean {
+        if (manga.source == LocalSource.ID) {
+            LocalSource.updateCover(context, manga, inputStream)
+            return true
+        }
+
         if (manga.thumbnail_url != null && manga.favorite) {
             coverCache.copyToCache(manga.thumbnail_url!!, inputStream)
             return true

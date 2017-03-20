@@ -7,8 +7,8 @@ import android.preference.PreferenceManager
 import com.f2prateek.rx.preferences.Preference
 import com.f2prateek.rx.preferences.RxSharedPreferences
 import eu.kanade.tachiyomi.R
-import eu.kanade.tachiyomi.data.source.Source
 import eu.kanade.tachiyomi.data.track.TrackService
+import eu.kanade.tachiyomi.source.Source
 import java.io.File
 
 fun <T> Preference<T>.getOrDefault(): T = get() ?: defaultValue()!!
@@ -34,7 +34,7 @@ class PreferencesHelper(val context: Context) {
 
     fun rotation() = rxPrefs.getInteger(keys.rotation, 1)
 
-    fun enableTransitions() = rxPrefs.getBoolean(keys.enableTransitions, true)
+    fun pageTransitions() = rxPrefs.getBoolean(keys.enableTransitions, true)
 
     fun showPageNumber() = rxPrefs.getBoolean(keys.showPageNumber, true)
 
@@ -60,6 +60,8 @@ class PreferencesHelper(val context: Context) {
 
     fun readerTheme() = rxPrefs.getInteger(keys.readerTheme, 0)
 
+    fun cropBorders() = rxPrefs.getBoolean(keys.cropBorders, false)
+
     fun readWithTapping() = rxPrefs.getBoolean(keys.readWithTapping, true)
 
     fun readWithVolumeKeys() = rxPrefs.getBoolean(keys.readWithVolumeKeys, false)
@@ -74,7 +76,7 @@ class PreferencesHelper(val context: Context) {
 
     fun askUpdateTrack() = prefs.getBoolean(keys.askUpdateTrack, false)
 
-    fun lastUsedCatalogueSource() = rxPrefs.getInteger(keys.lastUsedCatalogueSource, -1)
+    fun lastUsedCatalogueSource() = rxPrefs.getLong(keys.lastUsedCatalogueSource, -1)
 
     fun lastUsedCategory() = rxPrefs.getInteger(keys.lastUsedCategory, 0)
 
@@ -140,7 +142,9 @@ class PreferencesHelper(val context: Context) {
 
     fun hiddenCatalogues() = rxPrefs.getStringSet("hidden_catalogues", emptySet())
 
-    fun downloadNew() = prefs.getBoolean(keys.downloadNew, false)
+    fun downloadNew() = rxPrefs.getBoolean(keys.downloadNew, false)
+
+    fun downloadNewCategories() = rxPrefs.getStringSet(keys.downloadNewCategories, emptySet())
 
     fun lang() = prefs.getString(keys.lang, "")
 

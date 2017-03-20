@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.data.library
 
 import android.app.PendingIntent
 import android.app.Service
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
@@ -18,10 +17,12 @@ import eu.kanade.tachiyomi.data.database.models.Manga
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.DownloadService
 import eu.kanade.tachiyomi.data.library.LibraryUpdateService.Companion.start
+import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.data.preference.getOrDefault
-import eu.kanade.tachiyomi.data.source.SourceManager
-import eu.kanade.tachiyomi.data.source.online.OnlineSource
+import eu.kanade.tachiyomi.source.SourceManager
+import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.util.*
 import rx.Observable
@@ -56,6 +57,9 @@ class LibraryUpdateService : Service() {
      */
     val preferences: PreferencesHelper by injectLazy()
 
+    /**
+     * Download Manager
+     */
     val downloadManager: DownloadManager by injectLazy()
 
     /**
@@ -67,6 +71,11 @@ class LibraryUpdateService : Service() {
      * Subscription where the update is done.
      */
     private var subscription: Subscription? = null
+
+    /**
+     * Pending intent of action that cancels the library update
+     */
+    private val cancelPendingIntent by lazy {NotificationReceiver.cancelLibraryUpdatePendingBroadcast(this)}
 
     /**
      * Id of the library update notification.
@@ -210,11 +219,11 @@ class LibraryUpdateService : Service() {
                         .filter { it.category in categoriesToUpdate }
                         .distinctBy { it.id }
             else
-                db.getFavoriteMangas().executeAsBlocking().distinctBy { it.id }
+                db.getLibraryMangas().executeAsBlocking().distinctBy { it.id }
         }
 
         if (!intent.getBooleanExtra(UPDATE_DETAILS, false) && preferences.updateOnlyNonCompleted()) {
-            listToUpdate = listToUpdate.filter { it.status != Manga.COMPLETED }
+            listToUpdate = listToUpdate.filter { it.status != SManga.COMPLETED }
         }
 
         return listToUpdate
@@ -232,16 +241,21 @@ class LibraryUpdateService : Service() {
     fun updateChapterList(mangaToUpdate: List<Manga>): Observable<Manga> {
         // Initialize the variables holding the progress of the updates.
         val count = AtomicInteger(0)
+        // List containing new updates
         val newUpdates = ArrayList<Manga>()
+        // list containing failed updates
         val failedUpdates = ArrayList<Manga>()
-
-        val cancelIntent = PendingIntent.getBroadcast(this, 0,
-                Intent(this, CancelUpdateReceiver::class.java), 0)
+        // List containing categories that get included in downloads.
+        val categoriesToDownload = preferences.downloadNewCategories().getOrDefault().map(String::toInt)
+        // Boolean to determine if user wants to automatically download new chapters.
+        val downloadNew = preferences.downloadNew().getOrDefault()
+        // Boolean to determine if DownloadManager has downloads
+        var hasDownloads = false
 
         // Emit each manga and update it sequentially.
         return Observable.from(mangaToUpdate)
                 // Notify manga that will update.
-                .doOnNext { showProgressNotification(it, count.andIncrement, mangaToUpdate.size, cancelIntent) }
+                .doOnNext { showProgressNotification(it, count.andIncrement, mangaToUpdate.size, cancelPendingIntent) }
                 // Update the chapters of the manga.
                 .concatMap { manga ->
                     updateManga(manga)
@@ -251,10 +265,13 @@ class LibraryUpdateService : Service() {
                                 Pair(emptyList<Chapter>(), emptyList<Chapter>())
                             }
                             // Filter out mangas without new chapters (or failed).
-                            .filter { pair -> pair.first.size > 0 }
+                            .filter { pair -> pair.first.isNotEmpty() }
                             .doOnNext {
-                                if (preferences.downloadNew()) {
-                                    downloadChapters(manga, it.first)
+                                if (downloadNew) {
+                                    if (categoriesToDownload.isEmpty() || manga.category in categoriesToDownload) {
+                                        downloadChapters(manga, it.first)
+                                        hasDownloads = true
+                                    }
                                 }
                             }
                             // Convert to the manga that contains new chapters.
@@ -273,10 +290,12 @@ class LibraryUpdateService : Service() {
                     if (newUpdates.isEmpty()) {
                         cancelNotification()
                     } else {
-                        if (preferences.downloadNew()) {
-                            DownloadService.start(this)
-                        }
                         showResultNotification(newUpdates, failedUpdates)
+                        if (downloadNew) {
+                            if (hasDownloads) {
+                                DownloadService.start(this)
+                            }
+                        }
                     }
                 }
     }
@@ -297,7 +316,7 @@ class LibraryUpdateService : Service() {
      * @return a pair of the inserted and removed chapters.
      */
     fun updateManga(manga: Manga): Observable<Pair<List<Chapter>, List<Chapter>>> {
-        val source = sourceManager.get(manga.source) as? OnlineSource ?: return Observable.empty()
+        val source = sourceManager.get(manga.source) as? HttpSource ?: return Observable.empty()
         return source.fetchChapterList(manga)
                 .map { syncChaptersWithSource(db, it, manga, source) }
     }
@@ -315,22 +334,20 @@ class LibraryUpdateService : Service() {
         // Initialize the variables holding the progress of the updates.
         val count = AtomicInteger(0)
 
-        val cancelIntent = PendingIntent.getBroadcast(this, 0,
-                Intent(this, CancelUpdateReceiver::class.java), 0)
-
         // Emit each manga and update it sequentially.
         return Observable.from(mangaToUpdate)
                 // Notify manga that will update.
-                .doOnNext { showProgressNotification(it, count.andIncrement, mangaToUpdate.size, cancelIntent) }
+                .doOnNext { showProgressNotification(it, count.andIncrement, mangaToUpdate.size, cancelPendingIntent) }
                 // Update the details of the manga.
                 .concatMap { manga ->
-                    val source = sourceManager.get(manga.source) as? OnlineSource
+                    val source = sourceManager.get(manga.source) as? HttpSource
                             ?: return@concatMap Observable.empty<Manga>()
 
                     source.fetchMangaDetails(manga)
-                            .doOnNext { networkManga ->
+                            .map { networkManga ->
                                 manga.copyFrom(networkManga)
                                 db.insertManga(manga).executeAsBlocking()
+                                manga
                             }
                             .onErrorReturn { manga }
                 }
@@ -457,19 +474,4 @@ class LibraryUpdateService : Service() {
             intent.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             return PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT)
         }
-
-    /**
-     * Class that stops updating the library.
-     */
-    class CancelUpdateReceiver : BroadcastReceiver() {
-        /**
-         * Method called when user wants a library update.
-         * @param context the application context.
-         * @param intent the intent received.
-         */
-        override fun onReceive(context: Context, intent: Intent) {
-            LibraryUpdateService.stop(context)
-            context.notificationManager.cancel(Constants.NOTIFICATION_LIBRARY_ID)
-        }
-    }
 }
